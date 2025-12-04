@@ -1072,7 +1072,7 @@ describe("Partial message streaming", () => {
 });
 
 describe("Tool result handling", () => {
-  it("should filter out SAY TOOL messages (raw JSON tool data)", () => {
+  it("should convert SAY TOOL messages to tool_call for follow feature", () => {
     const notification = clineMessageToAcpNotification(
       {
         ts: Date.now(),
@@ -1080,15 +1080,20 @@ describe("Tool result handling", () => {
         say: ClineSay.TOOL,
         text: JSON.stringify({
           tool: "read_file",
+          path: "/path/to/file.ts",
           result: "file contents here",
         }),
       },
       "session-123",
     );
 
-    // SAY TOOL messages contain raw JSON and should be filtered out
-    // Tool calls are handled separately via the ASK/approval flow
-    expect(notification).toBeNull();
+    // SAY TOOL messages are converted to tool_call notifications
+    // This enables the "follow" feature so editors can track what files the agent is working on
+    expect(notification).not.toBeNull();
+    expect(notification?.update.sessionUpdate).toBe("tool_call");
+    expect((notification?.update as any).status).toBe("completed");
+    expect((notification?.update as any).kind).toBe("read");
+    expect((notification?.update as any).locations).toContainEqual({ path: "/path/to/file.ts" });
   });
 
   it("should convert command output to tool_call_result", () => {

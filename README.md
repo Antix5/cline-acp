@@ -41,7 +41,26 @@ The agent will automatically connect to an existing Cline instance or start a ne
 
 ### With Zed
 
-Configure Zed to use cline-acp as an external agent. See [Zed's External Agent documentation](https://zed.dev/docs/ai/external-agents).
+1. **Install dependencies** (if not already done):
+
+   ```bash
+   npm install -g cline-acp
+   ```
+
+2. **Configure Zed** by adding the agent server to your Zed `settings.json`:
+
+   ```json
+   {
+     "agent_servers": {
+       "Cline": {
+         "type": "custom",
+         "command": "cline-acp"
+       }
+     }
+   }
+   ```
+
+For more information about Zed's external agents, see [Zed's External Agent documentation](https://zed.dev/docs/ai/external-agents).
 
 ### Other Clients
 

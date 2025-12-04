@@ -86,10 +86,10 @@ export function clineMessageToAcpNotification(
       return null;
     }
 
-    // Skip tool messages - these contain raw JSON tool data
-    // Tool calls are handled separately via the ASK/approval flow
+    // Convert SAY TOOL messages to tool_call notifications for "follow" feature
+    // These are auto-approved tool executions - emit them so editor can follow along
     if (sayType === "tool") {
-      return null;
+      return clineSayToolToAcpToolCall(msg, sessionId);
     }
 
     // Skip the first say:text message - it's always the user's echoed input
@@ -101,6 +101,11 @@ export function clineMessageToAcpNotification(
     if (sayType === "reasoning") {
       const text = msg.reasoning || extractTextFromMessage(msg);
       if (text) {
+        // Skip if the reasoning text looks like raw JSON tool data
+        // (sometimes Cline embeds tool info in reasoning messages)
+        if (looksLikeToolJson(text)) {
+          return null;
+        }
         return {
           sessionId,
           update: {
@@ -112,9 +117,13 @@ export function clineMessageToAcpNotification(
       return null;
     }
 
-    // Default to text message for other say types (text, tool, command_output, etc.)
+    // Default to text message for other say types (text, command_output, etc.)
     const text = extractTextFromMessage(msg);
     if (text) {
+      // Skip if the text looks like raw JSON tool data
+      if (looksLikeToolJson(text)) {
+        return null;
+      }
       return {
         sessionId,
         update: {
@@ -179,6 +188,36 @@ export function clineMessageToAcpNotification(
   }
 
   return null;
+}
+
+/**
+ * Check if text looks like raw JSON tool data that should be filtered out
+ */
+function looksLikeToolJson(text: string): boolean {
+  // Quick check - must start with { and be valid JSON
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    // Check for common tool JSON patterns
+    if (typeof parsed === "object" && parsed !== null) {
+      // Has a "tool" field (Cline tool format)
+      if ("tool" in parsed) {
+        return true;
+      }
+      // Has tool-like fields without explicit "tool" key
+      if ("path" in parsed && ("content" in parsed || "operationIsLocatedInWorkspace" in parsed)) {
+        return true;
+      }
+    }
+  } catch {
+    // Not valid JSON
+  }
+
+  return false;
 }
 
 /**
@@ -295,11 +334,20 @@ export function parseToolInfo(msg: ClineMessage): ClineToolInfo {
       title = `${toolType}: ${data.command}`;
     }
 
+    // For file operations, Cline provides:
+    // - path: relative path (e.g., "src/foo.ts")
+    // - content: absolute path (e.g., "/Users/.../src/foo.ts")
+    // Use the absolute path from content when available
+    let filePath = data.path;
+    if (typeof data.content === "string" && data.content.startsWith("/")) {
+      filePath = data.content;
+    }
+
     return {
       type: toolType,
       title,
       input: data,
-      path: data.path,
+      path: filePath,
     };
   } catch {
     return {
@@ -331,7 +379,7 @@ function mapToolKind(
 }
 
 /**
- * Convert Cline tool ask to ACP tool call notification
+ * Convert Cline tool ask to ACP tool call notification (pending approval)
  */
 export function clineToolAskToAcpToolCall(
   msg: ClineMessage,
@@ -351,6 +399,43 @@ export function clineToolAskToAcpToolCall(
       sessionUpdate: "tool_call",
       toolCallId: String(msg.ts),
       status: "pending",
+      title: toolInfo.title,
+      kind,
+      rawInput: toolInfo.input,
+      content: [],
+      locations,
+    },
+  };
+}
+
+/**
+ * Convert Cline SAY TOOL message to ACP tool call notification (completed/auto-approved)
+ * This enables the "follow" feature so editors can track what files the agent is working on
+ */
+export function clineSayToolToAcpToolCall(
+  msg: ClineMessage,
+  sessionId: string,
+): SessionNotification | null {
+  const toolInfo = parseToolInfo(msg);
+
+  // Skip if we couldn't parse tool info
+  if (toolInfo.type === "unknown") {
+    return null;
+  }
+
+  const kind = mapToolKind(toolInfo.type);
+
+  const locations: Array<{ path: string }> = [];
+  if (toolInfo.path) {
+    locations.push({ path: toolInfo.path });
+  }
+
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: "tool_call",
+      toolCallId: String(msg.ts),
+      status: "completed", // SAY TOOL means tool already executed
       title: toolInfo.title,
       kind,
       rawInput: toolInfo.input,
@@ -493,6 +578,10 @@ export function isWaitingForUserInput(messages: ClineMessage[]): boolean {
 
 /**
  * Check if approval is needed based on messages
+ *
+ * IMPORTANT: Only returns true when the message is COMPLETE (not partial).
+ * Cline ignores approval responses sent while the message is still partial.
+ * We must wait for the message to be complete before requesting approval.
  */
 export function needsApproval(messages: ClineMessage[]): boolean {
   if (messages.length === 0) return false;
@@ -501,6 +590,10 @@ export function needsApproval(messages: ClineMessage[]): boolean {
 
   // Only ASK messages can need approval
   if (lastMessage.type !== ClineMessageType.ASK) return false;
+
+  // CRITICAL: Don't request approval while message is still partial
+  // Cline ignores approval responses for partial messages
+  if (lastMessage.partial) return false;
 
   // These ask types require approval
   const approvalTypes = [

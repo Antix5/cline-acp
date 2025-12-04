@@ -3,6 +3,9 @@
  */
 
 import { v7 as uuidv7 } from "uuid";
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
 import {
   Agent,
   AgentSideConnection,
@@ -53,6 +56,13 @@ export interface ClineAcpAgentOptions {
   useExisting?: boolean;
 }
 
+// Log file path for verbose logging - in project's logs directory
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, "../..");
+const LOGS_DIR = path.join(PROJECT_ROOT, "logs");
+const LOG_FILE_PATH = path.join(LOGS_DIR, "cline-acp-debug.log");
+
 export class ClineAcpAgent implements Agent {
   private client!: AgentSideConnection;
   private clientCapabilities: InitializeRequest["clientCapabilities"] = {};
@@ -61,12 +71,23 @@ export class ClineAcpAgent implements Agent {
   private clineInstance: ClineInstance | null = null;
   private processManager: ClineProcessManager | null = null;
   private options: ClineAcpAgentOptions;
+  private logStream: fs.WriteStream | null = null;
 
   constructor(options: ClineAcpAgentOptions = {}) {
     this.options = options;
     // Use injected client for testing
     if (options.clineClient) {
       this.clineClient = options.clineClient;
+    }
+    // Initialize log file if verbose mode is enabled
+    if (options.verbose) {
+      // Ensure logs directory exists
+      if (!fs.existsSync(LOGS_DIR)) {
+        fs.mkdirSync(LOGS_DIR, { recursive: true });
+      }
+      this.logStream = fs.createWriteStream(LOG_FILE_PATH, { flags: "a" });
+      this.log("=== Cline ACP Agent started ===");
+      this.log(`Log file: ${LOG_FILE_PATH}`);
     }
   }
 
@@ -246,6 +267,10 @@ export class ClineAcpAgent implements Agent {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
 
+    // Reset cancelled flag in case this session was previously cancelled
+    // This allows follow-up prompts after a cancel
+    session.cancelled = false;
+
     // Convert ACP prompt to Cline format
     const clinePrompt = acpPromptToCline(params);
 
@@ -316,10 +341,12 @@ export class ClineAcpAgent implements Agent {
       return;
     }
 
+    this.log("cancel: cancelling session", { sessionId: params.sessionId });
     session.cancelled = true;
 
     if (this.clineClient) {
       await this.clineClient.Task.cancelTask({});
+      this.log("cancel: cancelTask sent to Cline");
     }
   }
 
@@ -367,13 +394,26 @@ export class ClineAcpAgent implements Agent {
 
   // Internal methods
 
+  private log(message: string, ...args: unknown[]): void {
+    if (this.options.verbose && this.logStream) {
+      const timestamp = new Date().toISOString();
+      const argsStr = args.length > 0 ? " " + JSON.stringify(args) : "";
+      this.logStream.write(`[${timestamp}] ${message}${argsStr}\n`);
+    }
+  }
+
   private async processStreamingResponses(
     sessionId: string,
     existingTimestamps: Set<number> = new Set(),
     userInputText: string = "",
   ): Promise<void> {
     const session = this.sessions[sessionId];
-    if (!session || session.cancelled || !this.clineClient) return;
+    if (!session || session.cancelled || !this.clineClient) {
+      this.log("processStreamingResponses: early exit", { session: !!session, cancelled: session?.cancelled, clineClient: !!this.clineClient });
+      return;
+    }
+
+    this.log("processStreamingResponses: starting", { sessionId, existingTimestampsCount: existingTimestamps.size });
 
     // Subscribe to state updates - this gives us complete messages
     const stateStream = this.clineClient.State.subscribeToState();
@@ -390,11 +430,18 @@ export class ClineAcpAgent implements Agent {
     // This prevents duplicate permission requests if state updates arrive before Cline processes our response
     const handledApprovalTimestamps = new Set<number>();
 
+    let stateUpdateCount = 0;
+
     try {
       for await (const state of stateStream) {
-        if (session.cancelled) break;
+        stateUpdateCount++;
+        if (session.cancelled) {
+          this.log("processStreamingResponses: cancelled, breaking");
+          break;
+        }
 
         const messages = extractMessagesFromState(state.stateJson || "{}");
+        this.log(`State update #${stateUpdateCount}:`, { messageCount: messages.length });
 
         // Check for task_progress updates and emit plan notifications
         const latestTaskProgress = getLatestTaskProgress(messages);
@@ -448,6 +495,10 @@ export class ClineAcpAgent implements Agent {
           // Pass the original message index to properly skip user's echoed input (index 0)
           const notification = clineMessageToAcpNotification(msg, sessionId, i);
           if (notification) {
+            // Log tool_call notifications for debugging file navigation
+            if (notification.update.sessionUpdate === "tool_call") {
+              this.log("Emitting tool_call notification:", JSON.stringify(notification.update, null, 2));
+            }
             await this.client.sessionUpdate(notification);
           }
         }
@@ -456,13 +507,24 @@ export class ClineAcpAgent implements Agent {
         const lastMessage = messages[messages.length - 1];
         const lastMessageIsNew = lastMessage?.ts && !existingTimestamps.has(lastMessage.ts);
 
+        if (lastMessage) {
+          const msgType = String(lastMessage.type || "").toLowerCase();
+          const askType = String(lastMessage.ask || "").toLowerCase();
+          const sayType = String(lastMessage.say || "").toLowerCase();
+          this.log(`Last message:`, { ts: lastMessage.ts, type: msgType, ask: askType, say: sayType, partial: lastMessage.partial, isNew: lastMessageIsNew });
+        }
+
         // Check if task needs approval (only for new messages we haven't already handled)
         // We track handled timestamps because state updates may arrive before Cline processes our response
         if (lastMessageIsNew && needsApproval(messages)) {
           const approvalTs = lastMessage.ts;
           if (approvalTs && !handledApprovalTimestamps.has(approvalTs)) {
+            this.log("Requesting approval for tool call", { ts: approvalTs });
             handledApprovalTimestamps.add(approvalTs);
             await this.handleApprovalRequest(sessionId, messages);
+            this.log("Approval request completed");
+          } else {
+            this.log("Skipping duplicate approval request", { ts: approvalTs });
           }
           continue;
         }
@@ -471,20 +533,22 @@ export class ClineAcpAgent implements Agent {
         // This happens with plan_mode_respond, followup, completion_result
         // Only break if the waiting message is NEW (not from before this prompt)
         if (lastMessageIsNew && isWaitingForUserInput(messages)) {
+          this.log("Breaking: Cline is waiting for user input");
           break;
         }
 
         // Check if task is fully complete (only for new messages)
         if (lastMessageIsNew && isTaskComplete(messages)) {
+          this.log("Breaking: Task is complete");
           break;
         }
       }
+      this.log("Stream loop ended normally", { stateUpdateCount });
     } catch (error) {
       // Stream ended or error occurred
-      if (this.options.verbose) {
-        console.log("State stream ended:", error);
-      }
+      this.log("State stream ended with error:", error);
     }
+    this.log("processStreamingResponses: finished");
   }
 
   private async handleApprovalRequest(
@@ -493,6 +557,8 @@ export class ClineAcpAgent implements Agent {
   ): Promise<void> {
     const lastMessage = messages[messages.length - 1];
     const toolInfo = parseToolInfo(lastMessage);
+
+    this.log("handleApprovalRequest: requesting permission", { tool: toolInfo.type, title: toolInfo.title });
 
     // Request permission from ACP client
     const response = await this.client.requestPermission({
@@ -509,6 +575,8 @@ export class ClineAcpAgent implements Agent {
       },
     });
 
+    this.log("handleApprovalRequest: got response from ACP client", { outcome: response.outcome });
+
     // Send response to Cline
     if (this.clineClient) {
       const outcome = response.outcome;
@@ -516,19 +584,23 @@ export class ClineAcpAgent implements Agent {
         outcome?.outcome === "selected" &&
         (outcome.optionId === "allow" || outcome.optionId === "allow_always")
       ) {
+        this.log("handleApprovalRequest: sending YES to Cline");
         await this.clineClient.Task.askResponse({
           responseType: AskResponseType.YES_BUTTON_CLICKED,
           text: "",
           images: [],
           files: [],
         });
+        this.log("handleApprovalRequest: YES sent successfully");
       } else {
+        this.log("handleApprovalRequest: sending NO to Cline");
         await this.clineClient.Task.askResponse({
           responseType: AskResponseType.NO_BUTTON_CLICKED,
           text: "",
           images: [],
           files: [],
         });
+        this.log("handleApprovalRequest: NO sent successfully");
       }
     }
   }
@@ -545,6 +617,11 @@ export class ClineAcpAgent implements Agent {
    * Shutdown the agent, stopping any managed processes
    */
   async shutdown(): Promise<void> {
+    this.log("=== Cline ACP Agent shutting down ===");
+    if (this.logStream) {
+      this.logStream.end();
+      this.logStream = null;
+    }
     if (this.processManager) {
       await this.processManager.stopInstance();
       this.processManager = null;
