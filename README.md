@@ -15,10 +15,10 @@ Use Cline from ACP clients such as [Zed](https://zed.dev)!
 
 ## Prerequisites
 
-You need the [Cline CLI](https://www.npmjs.com/package/@anthropic-ai/cline) installed:
+You need the [Cline CLI](https://www.npmjs.com/package/cline) installed:
 
 ```bash
-npm install -g @anthropic-ai/cline
+npm install -g cline
 ```
 
 Configure your API key in Cline's settings before use.
