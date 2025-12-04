@@ -31,7 +31,9 @@ import {
   acpPromptToCline,
   clineMessageToAcpNotification,
   clinePartialToAcpNotification,
+  clineTaskProgressToAcpPlan,
   extractMessagesFromState,
+  getLatestTaskProgress,
   isTaskComplete,
   isWaitingForUserInput,
   needsApproval,
@@ -281,6 +283,16 @@ export class ClineAcpAgent implements Agent {
         });
       }
 
+      // Clear any existing plan from previous prompts
+      // This ensures a fresh plan state when starting new work
+      await this.client.sessionUpdate({
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "plan",
+          entries: [],
+        },
+      });
+
       // Process streaming responses, skipping any existing messages
       // Also pass the user's input text so we can skip the echoed message
       await this.processStreamingResponses(params.sessionId, existingTimestamps, clinePrompt.text);
@@ -371,11 +383,28 @@ export class ClineAcpAgent implements Agent {
     // Start with any existing timestamps passed in (from before the current prompt)
     const sentMessageTimestamps = new Set<number>(existingTimestamps);
 
+    // Track the last task_progress timestamp to detect changes
+    let lastTaskProgressTs: number | null = null;
+
+    // Track which approval requests we've already handled
+    // This prevents duplicate permission requests if state updates arrive before Cline processes our response
+    const handledApprovalTimestamps = new Set<number>();
+
     try {
       for await (const state of stateStream) {
         if (session.cancelled) break;
 
         const messages = extractMessagesFromState(state.stateJson || "{}");
+
+        // Check for task_progress updates and emit plan notifications
+        const latestTaskProgress = getLatestTaskProgress(messages);
+        if (latestTaskProgress && latestTaskProgress.ts !== lastTaskProgressTs) {
+          lastTaskProgressTs = latestTaskProgress.ts || null;
+          const planNotification = clineTaskProgressToAcpPlan(latestTaskProgress, sessionId);
+          if (planNotification) {
+            await this.client.sessionUpdate(planNotification);
+          }
+        }
 
         // Process all messages, checking each one's timestamp and partial status
         for (let i = 0; i < messages.length; i++) {
@@ -403,6 +432,14 @@ export class ClineAcpAgent implements Agent {
             continue;
           }
 
+          // Skip task_progress messages - we handle them separately as plan updates
+          if (msgType === "say" && sayType === "task_progress") {
+            if (msg.ts) {
+              sentMessageTimestamps.add(msg.ts);
+            }
+            continue;
+          }
+
           // Mark as sent only AFTER confirming it's complete and not already sent
           if (msg.ts) {
             sentMessageTimestamps.add(msg.ts);
@@ -419,9 +456,14 @@ export class ClineAcpAgent implements Agent {
         const lastMessage = messages[messages.length - 1];
         const lastMessageIsNew = lastMessage?.ts && !existingTimestamps.has(lastMessage.ts);
 
-        // Check if task needs approval (only for new messages)
+        // Check if task needs approval (only for new messages we haven't already handled)
+        // We track handled timestamps because state updates may arrive before Cline processes our response
         if (lastMessageIsNew && needsApproval(messages)) {
-          await this.handleApprovalRequest(sessionId, messages);
+          const approvalTs = lastMessage.ts;
+          if (approvalTs && !handledApprovalTimestamps.has(approvalTs)) {
+            handledApprovalTimestamps.add(approvalTs);
+            await this.handleApprovalRequest(sessionId, messages);
+          }
           continue;
         }
 

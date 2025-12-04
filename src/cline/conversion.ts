@@ -86,6 +86,12 @@ export function clineMessageToAcpNotification(
       return null;
     }
 
+    // Skip tool messages - these contain raw JSON tool data
+    // Tool calls are handled separately via the ASK/approval flow
+    if (sayType === "tool") {
+      return null;
+    }
+
     // Skip the first say:text message - it's always the user's echoed input
     if (sayType === "text" && messageIndex === 0) {
       return null;
@@ -370,6 +376,85 @@ export function isTaskComplete(messages: ClineMessage[]): boolean {
   }
 
   return false;
+}
+
+/**
+ * Parse Cline's task_progress markdown checklist into ACP PlanEntry format
+ * Cline uses: "- [ ]" for pending, "- [x]" for completed
+ */
+export interface ClinePlanEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/**
+ * Parse markdown checkbox format from Cline's task_progress messages
+ */
+export function parseTaskProgressToPlanEntries(text: string): ClinePlanEntry[] {
+  const entries: ClinePlanEntry[] = [];
+  const lines = text.split("\n");
+
+  for (const line of lines) {
+    // Match "- [ ] task" (unchecked) or "- [x] task" (checked)
+    const uncheckedMatch = line.match(/^[-*]\s*\[\s*\]\s*(.+)$/);
+    const checkedMatch = line.match(/^[-*]\s*\[x\]\s*(.+)$/i);
+
+    if (checkedMatch) {
+      entries.push({
+        content: checkedMatch[1].trim(),
+        status: "completed",
+      });
+    } else if (uncheckedMatch) {
+      entries.push({
+        content: uncheckedMatch[1].trim(),
+        status: "pending",
+      });
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Convert Cline task_progress message to ACP plan notification
+ */
+export function clineTaskProgressToAcpPlan(
+  msg: ClineMessage,
+  sessionId: string,
+): SessionNotification | null {
+  const text = msg.text || "";
+  const entries = parseTaskProgressToPlanEntries(text);
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: "plan",
+      entries: entries.map((entry) => ({
+        content: entry.content,
+        status: entry.status,
+        priority: "medium" as const,
+      })),
+    },
+  };
+}
+
+/**
+ * Extract the latest task_progress message from Cline messages
+ */
+export function getLatestTaskProgress(messages: ClineMessage[]): ClineMessage | null {
+  // Find the last task_progress message
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const sayType = String(msg.say || "").toLowerCase();
+    if (sayType === "task_progress") {
+      return msg;
+    }
+  }
+  return null;
 }
 
 /**

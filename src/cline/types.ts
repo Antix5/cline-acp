@@ -46,6 +46,7 @@ export enum ClineSay {
   USER_FEEDBACK_DIFF = "user_feedback_diff",
   ERROR = "error",
   DIFF = "diff",
+  TASK_PROGRESS = "task_progress",
 }
 
 // Plan/Act mode - values must match proto enum names (uppercase)

@@ -40,7 +40,10 @@ import {
   acpPromptToCline,
   clineMessageToAcpNotification,
   clinePartialToAcpNotification,
+  clineTaskProgressToAcpPlan,
+  getLatestTaskProgress,
   parseToolInfo,
+  parseTaskProgressToPlanEntries,
   clineToolAskToAcpToolCall,
   isTaskComplete,
   isWaitingForUserInput,
@@ -1069,7 +1072,7 @@ describe("Partial message streaming", () => {
 });
 
 describe("Tool result handling", () => {
-  it("should convert SAY TOOL to tool_call_result", () => {
+  it("should filter out SAY TOOL messages (raw JSON tool data)", () => {
     const notification = clineMessageToAcpNotification(
       {
         ts: Date.now(),
@@ -1083,8 +1086,9 @@ describe("Tool result handling", () => {
       "session-123",
     );
 
-    // Tool results should be converted appropriately
-    expect(notification).not.toBeNull();
+    // SAY TOOL messages contain raw JSON and should be filtered out
+    // Tool calls are handled separately via the ASK/approval flow
+    expect(notification).toBeNull();
   });
 
   it("should convert command output to tool_call_result", () => {
@@ -1099,5 +1103,197 @@ describe("Tool result handling", () => {
     );
 
     expect(notification).not.toBeNull();
+  });
+});
+
+describe("Task Progress / Plan Entries", () => {
+  describe("parseTaskProgressToPlanEntries()", () => {
+    it("should parse unchecked checkboxes as pending", () => {
+      const text = `- [ ] Set up project structure
+- [ ] Install dependencies
+- [ ] Create components`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(3);
+      expect(entries[0]).toEqual({
+        content: "Set up project structure",
+        status: "pending",
+      });
+      expect(entries[1]).toEqual({
+        content: "Install dependencies",
+        status: "pending",
+      });
+      expect(entries[2]).toEqual({
+        content: "Create components",
+        status: "pending",
+      });
+    });
+
+    it("should parse checked checkboxes as completed", () => {
+      const text = `- [x] Set up project structure
+- [x] Install dependencies
+- [ ] Create components`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(3);
+      expect(entries[0].status).toBe("completed");
+      expect(entries[1].status).toBe("completed");
+      expect(entries[2].status).toBe("pending");
+    });
+
+    it("should handle mixed case [X] as completed", () => {
+      const text = `- [X] Task with uppercase X`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(1);
+      expect(entries[0].status).toBe("completed");
+    });
+
+    it("should handle asterisk bullet points", () => {
+      const text = `* [ ] Task with asterisk
+* [x] Completed asterisk task`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(2);
+      expect(entries[0].status).toBe("pending");
+      expect(entries[1].status).toBe("completed");
+    });
+
+    it("should ignore non-checkbox lines", () => {
+      const text = `# Task Progress
+- [x] First task
+Some description text
+- [ ] Second task`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(2);
+    });
+
+    it("should return empty array for text without checkboxes", () => {
+      const text = `No checkboxes here
+Just regular text`;
+
+      const entries = parseTaskProgressToPlanEntries(text);
+
+      expect(entries).toHaveLength(0);
+    });
+  });
+
+  describe("clineTaskProgressToAcpPlan()", () => {
+    it("should convert task_progress message to ACP plan notification", () => {
+      const notification = clineTaskProgressToAcpPlan(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TASK_PROGRESS,
+          text: `- [x] Set up project
+- [ ] Implement feature
+- [ ] Run tests`,
+        },
+        "session-123",
+      );
+
+      expect(notification).not.toBeNull();
+      expect(notification?.update.sessionUpdate).toBe("plan");
+
+      const update = notification?.update as { sessionUpdate: string; entries: Array<{ content: string; status: string; priority: string }> };
+      expect(update.entries).toHaveLength(3);
+      expect(update.entries[0]).toEqual({
+        content: "Set up project",
+        status: "completed",
+        priority: "medium",
+      });
+      expect(update.entries[1]).toEqual({
+        content: "Implement feature",
+        status: "pending",
+        priority: "medium",
+      });
+    });
+
+    it("should return null for empty task progress", () => {
+      const notification = clineTaskProgressToAcpPlan(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TASK_PROGRESS,
+          text: "No checkboxes here",
+        },
+        "session-123",
+      );
+
+      expect(notification).toBeNull();
+    });
+  });
+
+  describe("getLatestTaskProgress()", () => {
+    it("should find the last task_progress message", () => {
+      const messages: ClineMessage[] = [
+        {
+          ts: 1000,
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: "Hello",
+        },
+        {
+          ts: 2000,
+          type: ClineMessageType.SAY,
+          say: ClineSay.TASK_PROGRESS,
+          text: "- [ ] First version",
+        },
+        {
+          ts: 3000,
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: "Working...",
+        },
+        {
+          ts: 4000,
+          type: ClineMessageType.SAY,
+          say: ClineSay.TASK_PROGRESS,
+          text: "- [x] First version\n- [ ] Second version",
+        },
+      ];
+
+      const latest = getLatestTaskProgress(messages);
+
+      expect(latest).not.toBeNull();
+      expect(latest?.ts).toBe(4000);
+      expect(latest?.text).toContain("Second version");
+    });
+
+    it("should return null if no task_progress messages", () => {
+      const messages: ClineMessage[] = [
+        {
+          ts: 1000,
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: "Hello",
+        },
+      ];
+
+      const latest = getLatestTaskProgress(messages);
+
+      expect(latest).toBeNull();
+    });
+
+    it("should handle lowercase say type from state JSON", () => {
+      const messages: ClineMessage[] = [
+        {
+          ts: 1000,
+          type: ClineMessageType.SAY,
+          say: "task_progress" as ClineSay, // State JSON uses lowercase
+          text: "- [ ] Task",
+        },
+      ];
+
+      const latest = getLatestTaskProgress(messages);
+
+      expect(latest).not.toBeNull();
+    });
   });
 });
