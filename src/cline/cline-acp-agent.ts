@@ -33,7 +33,6 @@ import {
 import {
   acpPromptToCline,
   clineMessageToAcpNotification,
-  clinePartialToAcpNotification,
   clineTaskProgressToAcpPlan,
   clineSayToolToAcpToolCall,
   clineSayToolToAcpToolCallInProgress,
@@ -145,7 +144,7 @@ export class ClineAcpAgent implements Agent {
     };
   }
 
-  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+  async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
     const sessionId = uuidv7();
 
     // Create empty streams for testing - in production these come from gRPC
@@ -228,7 +227,7 @@ export class ClineAcpAgent implements Agent {
             }
           }
         }
-      } catch (error) {
+      } catch {
         // Default models if we can't fetch state
         availableModels.push(
           { modelId: "cline", name: "Cline (Default)" },
@@ -391,6 +390,10 @@ export class ClineAcpAgent implements Agent {
             metadata: {},
             mode: PlanActMode.ACT,
           });
+          break;
+
+        default:
+          // Unknown mode - ignore
           break;
       }
     }

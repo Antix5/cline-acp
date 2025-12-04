@@ -3,9 +3,7 @@
  */
 
 import { execSync } from "child_process";
-import * as path from "path";
 import * as fs from "fs";
-import * as os from "os";
 import { ClineInstance } from "./types.js";
 import { waitForGrpcReady } from "./grpc-client.js";
 

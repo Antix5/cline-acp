@@ -110,10 +110,10 @@ export interface AskResponseRequest {
   files: string[];
 }
 
-export interface EmptyRequest {}
+export type EmptyRequest = object;
 
 // Empty metadata message required by many Cline gRPC requests
-export interface Metadata {}
+export type Metadata = object;
 
 export interface TogglePlanActModeRequest {
   metadata: Metadata;

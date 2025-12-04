@@ -11,7 +11,6 @@ import {
   ClineClient,
   ClineMessage,
   StateUpdate,
-  PlanActMode,
   AsyncIterableStream,
 } from "./types.js";
 

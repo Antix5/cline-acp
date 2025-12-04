@@ -5,35 +5,16 @@
  * Following TDD approach: tests first, implementation follows.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  Agent,
-  AgentSideConnection,
-  AvailableCommand,
-  Client,
-  ClientSideConnection,
-  ndJsonStream,
-  NewSessionResponse,
-  ReadTextFileRequest,
-  ReadTextFileResponse,
-  RequestPermissionRequest,
-  RequestPermissionResponse,
-  SessionNotification,
-  WriteTextFileRequest,
-  WriteTextFileResponse,
-} from "@agentclientprotocol/sdk";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { AgentSideConnection } from "@agentclientprotocol/sdk";
 import {
   ClineMessage,
   ClineMessageType,
   ClineAsk,
   ClineSay,
   ClineClient,
-  ClineInstance,
-  ClineSession,
-  ClinePrompt,
   PlanActMode,
   StateUpdate,
-  AskResponseType,
 } from "../cline/types.js";
 import { ClineAcpAgent } from "../cline/cline-acp-agent.js";
 import {
@@ -1070,20 +1051,13 @@ describe("Permission handling", () => {
       clientCapabilities: {},
     });
 
-    const session = await agent.newSession({
+    await agent.newSession({
       cwd: "/test/path",
       mcpServers: [],
     });
 
     // Simulate a prompt that triggers a tool call requiring permission
     // This would be tested through the full prompt flow
-
-    // The permission request should include proper options
-    const expectedOptions = [
-      { kind: "allow_always", name: "Always Allow", optionId: "allow_always" },
-      { kind: "allow_once", name: "Allow", optionId: "allow" },
-      { kind: "reject_once", name: "Reject", optionId: "reject" },
-    ];
 
     // When permission is requested, verify the structure
     // This tests the integration point between Cline ask messages and ACP permission requests

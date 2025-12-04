@@ -45,6 +45,10 @@ export function acpPromptToCline(prompt: PromptRequest): ClinePrompt {
           // This would be handled by the agent layer
         }
         break;
+
+      default:
+        // Unknown chunk type - ignore
+        break;
     }
   }
 
@@ -309,7 +313,6 @@ export function clinePartialToAcpNotification(
   }
 
   // Handle ASK messages (for plan mode responses, followups, etc.)
-  const askCat = normalizeEnumValue(msg.ask as unknown as string);
   if (msgType === "ask" || msg.type === ClineMessageType.ASK) {
     const text = extractTextFromMessage(msg);
     if (text) {
