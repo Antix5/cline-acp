@@ -792,6 +792,50 @@ describe("Cline to ACP conversion", () => {
       expect(notification).not.toBeNull();
     });
 
+    it("should filter out tool JSON in SAY TEXT messages", () => {
+      // Regression test - this exact JSON format was being displayed to users
+      const toolJson = JSON.stringify({
+        tool: "readFile",
+        path: "README.md",
+        content: "/Users/jasonconigliari/Projects/LLM/claude-code-acp/README.md",
+        operationIsLocatedInWorkspace: true,
+      });
+
+      const notification = clineMessageToAcpNotification(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: toolJson,
+        },
+        "session-123",
+        1, // Not the first message
+      );
+
+      expect(notification).toBeNull();
+    });
+
+    it("should filter out tool JSON with only operationIsLocatedInWorkspace", () => {
+      // Another format that should be filtered
+      const toolJson = JSON.stringify({
+        operationIsLocatedInWorkspace: true,
+        someOtherField: "value",
+      });
+
+      const notification = clineMessageToAcpNotification(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: toolJson,
+        },
+        "session-123",
+        1,
+      );
+
+      expect(notification).toBeNull();
+    });
+
     it("should surface api_req_failed errors to the user", () => {
       const notification = clineMessageToAcpNotification(
         {
@@ -1408,6 +1452,103 @@ describe("Partial message streaming", () => {
 
     expect(notification).not.toBeNull();
     expect(notification?.update.sessionUpdate).toBe("agent_thought_chunk");
+  });
+
+  it("should filter out tool JSON from partial text messages", () => {
+    // This is a regression test - tool JSON was being displayed to users
+    const toolJson = JSON.stringify({
+      tool: "readFile",
+      path: "README.md",
+      content: "/Users/test/project/README.md",
+      operationIsLocatedInWorkspace: true,
+    });
+
+    const notification = clinePartialToAcpNotification(
+      {
+        ts: Date.now(),
+        type: ClineMessageType.SAY,
+        say: ClineSay.TEXT,
+        text: toolJson,
+        partial: true,
+      },
+      "session-123",
+    );
+
+    expect(notification).toBeNull();
+  });
+
+  it("should filter out tool JSON with operationIsLocatedInWorkspace from non-partial messages", () => {
+    // Specific test for the JSON format seen in production
+    const toolJson = JSON.stringify({
+      tool: "readFile",
+      path: "README.md",
+      content: "/Users/jasonconigliari/Projects/LLM/claude-code-acp/README.md",
+      operationIsLocatedInWorkspace: true,
+    });
+
+    const notification = clinePartialToAcpNotification(
+      {
+        ts: Date.now(),
+        type: ClineMessageType.SAY,
+        say: ClineSay.TEXT,
+        text: toolJson,
+        partial: false, // Non-partial message
+      },
+      "session-123",
+    );
+
+    expect(notification).toBeNull();
+  });
+
+  it("should filter out SAY TOOL messages from partial stream", () => {
+    const notification = clinePartialToAcpNotification(
+      {
+        ts: Date.now(),
+        type: ClineMessageType.SAY,
+        say: ClineSay.TOOL,
+        text: JSON.stringify({ tool: "readFile", path: "test.ts" }),
+        partial: true,
+      },
+      "session-123",
+    );
+
+    expect(notification).toBeNull();
+  });
+
+  it("should filter out ASK TOOL messages from partial stream", () => {
+    const notification = clinePartialToAcpNotification(
+      {
+        ts: Date.now(),
+        type: ClineMessageType.ASK,
+        ask: ClineAsk.TOOL,
+        text: JSON.stringify({ tool: "write_to_file", path: "test.ts" }),
+        partial: true,
+      },
+      "session-123",
+    );
+
+    expect(notification).toBeNull();
+  });
+
+  it("should filter out retry JSON from partial messages", () => {
+    const retryJson = JSON.stringify({
+      attempt: 1,
+      maxAttempts: 3,
+      delaySeconds: 0,
+    });
+
+    const notification = clinePartialToAcpNotification(
+      {
+        ts: Date.now(),
+        type: ClineMessageType.SAY,
+        say: ClineSay.TEXT,
+        text: retryJson,
+        partial: true,
+      },
+      "session-123",
+    );
+
+    expect(notification).toBeNull();
   });
 });
 

@@ -301,6 +301,7 @@ export function clineMessageToAcpNotification(
 
 /**
  * Check if text looks like raw JSON tool data that should be filtered out
+ * This catches Cline's internal tool formats that shouldn't be shown to users
  */
 function looksLikeToolJson(text: string): boolean {
   // Quick check - must start with { and be valid JSON
@@ -313,17 +314,36 @@ function looksLikeToolJson(text: string): boolean {
     const parsed = JSON.parse(trimmed);
     // Check for common tool JSON patterns
     if (typeof parsed === "object" && parsed !== null) {
-      // Has a "tool" field (Cline tool format)
+      // Has a "tool" field (Cline tool format) - e.g., {"tool":"readFile",...}
       if ("tool" in parsed) {
         return true;
       }
-      // Has tool-like fields without explicit "tool" key
-      if ("path" in parsed && ("content" in parsed || "operationIsLocatedInWorkspace" in parsed)) {
+      // Has operationIsLocatedInWorkspace (Cline tool metadata)
+      if ("operationIsLocatedInWorkspace" in parsed) {
+        return true;
+      }
+      // Has tool-like fields: path + content/diff/regex/filePattern
+      if ("path" in parsed) {
+        if (
+          "content" in parsed ||
+          "diff" in parsed ||
+          "regex" in parsed ||
+          "filePattern" in parsed
+        ) {
+          return true;
+        }
+      }
+      // Browser action format
+      if ("action" in parsed && ("url" in parsed || "coordinate" in parsed)) {
+        return true;
+      }
+      // MCP tool format
+      if ("serverName" in parsed && "toolName" in parsed) {
         return true;
       }
     }
   } catch {
-    // Not valid JSON
+    // Not valid JSON - not tool data
   }
 
   return false;
@@ -417,12 +437,22 @@ export function clinePartialToAcpNotification(
   const sayCat = normalizeEnumValue(msg.say as unknown as string);
 
   if (msgType === "say" || msg.type === ClineMessageType.SAY) {
+    // Skip tool messages in partial stream - they're handled separately
+    if (sayCat === "tool" || msg.say === ClineSay.TOOL) {
+      return null;
+    }
+
     if (sayCat === "reasoning" || msg.say === ClineSay.REASONING) {
+      const text = extractTextFromMessage(msg);
+      // Skip if reasoning looks like tool JSON
+      if (text && looksLikeToolJson(text)) {
+        return null;
+      }
       return {
         sessionId,
         update: {
           sessionUpdate: "agent_thought_chunk",
-          content: { type: "text", text: extractTextFromMessage(msg) },
+          content: { type: "text", text: text || "" },
         },
       };
     }
@@ -430,6 +460,14 @@ export function clinePartialToAcpNotification(
     // Default to message chunk for text
     const text = extractTextFromMessage(msg);
     if (text) {
+      // Skip if text looks like raw JSON tool data
+      if (looksLikeToolJson(text)) {
+        return null;
+      }
+      // Skip internal retry mechanism messages
+      if (looksLikeRetryJson(text)) {
+        return null;
+      }
       return {
         sessionId,
         update: {
@@ -442,8 +480,18 @@ export function clinePartialToAcpNotification(
 
   // Handle ASK messages (for plan mode responses, followups, etc.)
   if (msgType === "ask" || msg.type === ClineMessageType.ASK) {
+    const askCat = normalizeEnumValue(msg.ask as unknown as string);
+    // Skip tool/command asks in partial stream - handled by permission flow
+    if (askCat === "tool" || askCat === "command") {
+      return null;
+    }
+
     const text = extractTextFromMessage(msg);
     if (text) {
+      // Skip if text looks like tool JSON
+      if (looksLikeToolJson(text)) {
+        return null;
+      }
       return {
         sessionId,
         update: {
