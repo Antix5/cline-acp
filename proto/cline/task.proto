@@ -29,8 +29,8 @@ service TaskService {
 message NewTaskRequest {
   Metadata metadata = 1;
   string text = 2;
-  repeated string images = 3;
-  repeated string files = 4;
+  repeated string images = 3;  // File paths to images
+  repeated string files = 4;   // File paths to attach
 }
 
 message TaskFavoriteRequest {
@@ -84,8 +84,7 @@ message AskResponseRequest {
   Metadata metadata = 1;
   string response_type = 2;
   string text = 3;
-  repeated string images = 4;
-  repeated string files = 5;
+  repeated string images = 4;  // File paths to images
 }
 
 message ExecuteQuickWinRequest {

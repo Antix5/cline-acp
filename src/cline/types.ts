@@ -97,17 +97,17 @@ export enum AskResponseType {
 }
 
 // gRPC service request/response types
+// These match the proto definitions in proto/cline/task.proto
 export interface NewTaskRequest {
   text: string;
-  images: string[];
-  files: string[];
+  images?: string[]; // File paths to images
+  files?: string[]; // File paths to attach
 }
 
 export interface AskResponseRequest {
   responseType: AskResponseType | string;
-  text: string;
-  images: string[];
-  files: string[];
+  text?: string;
+  images?: string[];
 }
 
 export type EmptyRequest = object;
@@ -135,11 +135,86 @@ export interface AutoApprovalSettingsRequest {
   actions: AutoApprovalActions;
 }
 
+// API Provider enum - matches proto/cline/models.proto ApiProvider
+export enum ApiProvider {
+  ANTHROPIC = "ANTHROPIC",
+  OPENROUTER = "OPENROUTER",
+  BEDROCK = "BEDROCK",
+  VERTEX = "VERTEX",
+  OPENAI = "OPENAI",
+  OLLAMA = "OLLAMA",
+  LMSTUDIO = "LMSTUDIO",
+  GEMINI = "GEMINI",
+  OPENAI_NATIVE = "OPENAI_NATIVE",
+  REQUESTY = "REQUESTY",
+  TOGETHER = "TOGETHER",
+  DEEPSEEK = "DEEPSEEK",
+  QWEN = "QWEN",
+  DOUBAO = "DOUBAO",
+  MISTRAL = "MISTRAL",
+  VSCODE_LM = "VSCODE_LM",
+  CLINE = "CLINE",
+  LITELLM = "LITELLM",
+  NEBIUS = "NEBIUS",
+  FIREWORKS = "FIREWORKS",
+  ASKSAGE = "ASKSAGE",
+  XAI = "XAI",
+  SAMBANOVA = "SAMBANOVA",
+  CEREBRAS = "CEREBRAS",
+  GROQ = "GROQ",
+  SAPAICORE = "SAPAICORE",
+  CLAUDE_CODE = "CLAUDE_CODE",
+  MOONSHOT = "MOONSHOT",
+  HUGGINGFACE = "HUGGINGFACE",
+  HUAWEI_CLOUD_MAAS = "HUAWEI_CLOUD_MAAS",
+  BASETEN = "BASETEN",
+  ZAI = "ZAI",
+  VERCEL_AI_GATEWAY = "VERCEL_AI_GATEWAY",
+  QWEN_CODE = "QWEN_CODE",
+  DIFY = "DIFY",
+  OCA = "OCA",
+  MINIMAX = "MINIMAX",
+  HICAP = "HICAP",
+  AIHUBMIX = "AIHUBMIX",
+  NOUSRESEARCH = "NOUSRESEARCH",
+}
+
+// ModelsApiConfiguration - matches proto/cline/models.proto ModelsApiConfiguration
+// This is the full API configuration structure used in UpdateSettingsRequest
+// We only define the fields we currently use - the proto has 238+ fields
+export interface ModelsApiConfiguration {
+  // Global API configuration
+  apiKey?: string;
+  clineApiKey?: string;
+
+  // Provider-specific API keys
+  openRouterApiKey?: string;
+  xaiApiKey?: string;
+  openAiNativeApiKey?: string;
+  anthropicBaseUrl?: string;
+
+  // Plan mode configuration (fields 100-138 in proto)
+  planModeApiProvider?: ApiProvider | string;
+  planModeApiModelId?: string; // field 101 - generic model ID
+  planModeOpenRouterModelId?: string; // field 107 - OpenRouter/Cline provider model ID
+  planModeOpenRouterModelInfo?: OpenRouterModelInfo; // field 108 - OpenRouter model metadata
+  planModeOpenAiModelId?: string; // field 109 - OpenAI provider model ID
+  planModeOllamaModelId?: string; // field 111 - Ollama provider model ID
+  planModeGroqModelId?: string; // field 121 - Groq provider model ID
+
+  // Act mode configuration (fields 200-238 in proto)
+  actModeApiProvider?: ApiProvider | string;
+  actModeApiModelId?: string; // field 201 - generic model ID
+  actModeOpenRouterModelId?: string; // field 207 - OpenRouter/Cline provider model ID
+  actModeOpenRouterModelInfo?: OpenRouterModelInfo; // field 208 - OpenRouter model metadata
+  actModeOpenAiModelId?: string; // field 209 - OpenAI provider model ID
+  actModeOllamaModelId?: string; // field 211 - Ollama provider model ID
+  actModeGroqModelId?: string; // field 221 - Groq provider model ID
+}
+
 export interface UpdateSettingsRequest {
-  apiConfiguration?: {
-    apiModelId?: string;
-    apiProvider?: string;
-  };
+  apiConfiguration?: ModelsApiConfiguration;
+  mode?: PlanActMode;
   yoloModeToggled?: boolean;
 }
 
@@ -168,11 +243,37 @@ export interface UiService {
   subscribeToPartialMessage(request?: EmptyRequest): AsyncIterableStream<ClineMessage>;
 }
 
+// OpenRouter model info returned from ModelsService
+export interface OpenRouterModelInfo {
+  maxTokens?: number;
+  contextWindow?: number;
+  supportsImages?: boolean;
+  supportsPromptCache?: boolean;
+  inputPrice?: number;
+  outputPrice?: number;
+  cacheWritesPrice?: number;
+  cacheReadsPrice?: number;
+  description?: string;
+  name?: string;
+  temperature?: number;
+  supportsReasoning?: boolean;
+}
+
+// Response from refreshOpenRouterModelsRpc
+export interface OpenRouterModelsResponse {
+  models: Record<string, OpenRouterModelInfo>;
+}
+
+export interface ModelsService {
+  refreshOpenRouterModels(request?: EmptyRequest): Promise<OpenRouterModelsResponse>;
+}
+
 // Combined Cline client
 export interface ClineClient {
   Task: TaskService;
   State: StateService;
   Ui: UiService;
+  Models: ModelsService;
 }
 
 // Cline process instance
@@ -200,11 +301,11 @@ export interface ClineSession {
   totalCacheReads: number;
 }
 
-// Cline prompt format (converted from ACP)
+// Cline prompt format - matches NewTaskRequest
 export interface ClinePrompt {
   text: string;
-  images: string[];
-  files: string[];
+  images?: string[]; // File paths to images
+  files?: string[]; // File paths to attach
 }
 
 // Tool info parsed from Cline messages

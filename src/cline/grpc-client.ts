@@ -12,6 +12,7 @@ import {
   ClineMessage,
   StateUpdate,
   AsyncIterableStream,
+  OpenRouterModelsResponse,
 } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -170,6 +171,12 @@ export async function createClineClient(address: string): Promise<ClineClient> {
 
   const uiClient = loadProtoClient(path.join(protoDir, "ui.proto"), "UiService", address);
 
+  const modelsClient = loadProtoClient(
+    path.join(protoDir, "models.proto"),
+    "ModelsService",
+    address,
+  );
+
   return {
     Task: {
       async newTask(request): Promise<string> {
@@ -255,6 +262,15 @@ export async function createClineClient(address: string): Promise<ClineClient> {
             ) => grpc.ClientReadableStream<ClineMessage>
           )({}),
         );
+      },
+    },
+
+    Models: {
+      async refreshOpenRouterModels(): Promise<OpenRouterModelsResponse> {
+        return promisifyUnary<Record<string, never>, OpenRouterModelsResponse>(
+          modelsClient,
+          "refreshOpenRouterModelsRpc",
+        )({});
       },
     },
   };

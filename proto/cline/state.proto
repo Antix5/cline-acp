@@ -2,6 +2,7 @@ syntax = "proto3";
 package cline;
 
 import "cline/common.proto";
+import "cline/models.proto";
 
 option go_package = "github.com/cline/grpc-go/cline";
 option java_multiple_files = true;
@@ -69,6 +70,7 @@ message AutoApprovalSettingsRequest {
 
 message UpdateSettingsRequest {
   Metadata metadata = 1;
+  optional ModelsApiConfiguration api_configuration = 2;
   optional PlanActMode mode = 13;
   optional bool yolo_mode_toggled = 22;
 }

@@ -27,6 +27,7 @@ import {
   ClineSession,
   PlanActMode,
   AskResponseType,
+  ApiProvider,
   StateUpdate,
   ClineMessage,
 } from "./types.js";
@@ -147,6 +148,17 @@ export class ClineAcpAgent implements Agent {
   async newSession(_params: NewSessionRequest): Promise<NewSessionResponse> {
     const sessionId = uuidv7();
 
+    // Cancel any existing task so Cline picks up updated model configuration
+    // Cline caches its API handler, so we need to force a reset between sessions
+    if (this.clineClient) {
+      try {
+        await this.clineClient.Task.cancelTask({});
+        this.log("newSession: cancelled existing task");
+      } catch {
+        // No task to cancel, that's fine
+      }
+    }
+
     // Create empty streams for testing - in production these come from gRPC
     const stateStream = this.createEmptyStream<StateUpdate>();
     const partialStream = this.createEmptyStream<ClineMessage>();
@@ -186,10 +198,12 @@ export class ClineAcpAgent implements Agent {
     // Get current model configuration from Cline state
     let currentModelId = "cline";
     let currentMode = "plan";
+    let currentProvider = "";
     const availableModels: Array<{ modelId: string; name: string }> = [];
 
     if (this.clineClient) {
       try {
+        // First get state to determine the provider
         const state = await this.clineClient.State.getLatestState();
         const stateData = JSON.parse(state.stateJson || "{}");
         const apiConfig = stateData.apiConfiguration || {};
@@ -197,50 +211,62 @@ export class ClineAcpAgent implements Agent {
         // Get current mode from state (Cline uses "plan" or "act")
         currentMode = stateData.mode === "act" ? "act" : "plan";
 
-        // Get the current provider and model
-        const provider = apiConfig.planModeApiProvider || "cline";
-        const modelId = apiConfig.planModeOpenRouterModelId || apiConfig.apiModelId || provider;
+        // Get the current provider (lowercase string like "cline", "anthropic", "openai", etc.)
+        currentProvider = (apiConfig.planModeApiProvider || "").toLowerCase();
 
-        currentModelId = modelId;
+        // Get the current model from plan mode (which is what's displayed)
+        const planModelId =
+          apiConfig.planModeOpenRouterModelId ||
+          apiConfig.planModeApiModelId ||
+          apiConfig.apiModelId;
+        currentModelId = planModelId || "cline";
 
-        // Add the current model if it's not already in the list
-        availableModels.push({
-          modelId: currentModelId,
-          name: this.formatModelName(currentModelId),
-        });
+        // Fetch models based on the current provider
+        // Only CLINE and OPENROUTER providers use the OpenRouter models API
+        if (currentProvider === "cline" || currentProvider === "openrouter" || !currentProvider) {
+          const modelsResponse = await this.clineClient.Models.refreshOpenRouterModels().catch(
+            () => null,
+          );
 
-        // Add some common model options based on the provider
-        if (provider === "openrouter" || provider === "cline") {
-          const commonModels = [
-            "anthropic/claude-sonnet-4",
-            "anthropic/claude-3.5-sonnet",
-            "openai/gpt-4o",
-            "google/gemini-2.0-flash-exp",
-            "x-ai/grok-3-mini-beta",
-          ];
-          for (const model of commonModels) {
-            if (!availableModels.find((m) => m.modelId === model)) {
+          if (modelsResponse?.models && Object.keys(modelsResponse.models).length > 0) {
+            // Sort models by name for consistent display
+            const modelEntries = Object.entries(modelsResponse.models);
+            modelEntries.sort((a, b) => {
+              const nameA = a[1].name || a[0];
+              const nameB = b[1].name || b[0];
+              return nameA.localeCompare(nameB);
+            });
+
+            for (const [modelId, modelInfo] of modelEntries) {
               availableModels.push({
-                modelId: model,
-                name: this.formatModelName(model),
+                modelId,
+                name: modelInfo.name || this.formatModelName(modelId),
               });
             }
           }
+        } else {
+          // For other providers, use provider-specific model lists
+          const providerModels = this.getModelsForProvider(currentProvider);
+          availableModels.push(...providerModels);
+        }
+
+        // If no models found, add at least the current model
+        if (availableModels.length === 0 && currentModelId && currentModelId !== "cline") {
+          availableModels.push({
+            modelId: currentModelId,
+            name: this.formatModelName(currentModelId),
+          });
         }
       } catch {
         // Default models if we can't fetch state
         availableModels.push(
-          { modelId: "cline", name: "Cline (Default)" },
           { modelId: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4" },
           { modelId: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet" },
         );
       }
     } else {
       // Default models for testing
-      availableModels.push(
-        { modelId: "cline", name: "Cline (Default)" },
-        { modelId: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4" },
-      );
+      availableModels.push({ modelId: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4" });
     }
 
     return {
@@ -271,6 +297,55 @@ export class ClineAcpAgent implements Agent {
       .join(" ");
   }
 
+  /**
+   * Get available models for a specific provider
+   * These are fallback lists for providers that don't use the OpenRouter API
+   */
+  private getModelsForProvider(provider: string): Array<{ modelId: string; name: string }> {
+    const providerModels: Record<string, Array<{ modelId: string; name: string }>> = {
+      anthropic: [
+        { modelId: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
+        { modelId: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
+        { modelId: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
+        { modelId: "claude-3-opus-20240229", name: "Claude 3 Opus" },
+      ],
+      openai: [
+        { modelId: "gpt-4o", name: "GPT-4o" },
+        { modelId: "gpt-4o-mini", name: "GPT-4o Mini" },
+        { modelId: "gpt-4-turbo", name: "GPT-4 Turbo" },
+        { modelId: "o1-preview", name: "O1 Preview" },
+        { modelId: "o1-mini", name: "O1 Mini" },
+      ],
+      openai_native: [
+        { modelId: "gpt-4o", name: "GPT-4o" },
+        { modelId: "gpt-4o-mini", name: "GPT-4o Mini" },
+        { modelId: "gpt-4-turbo", name: "GPT-4 Turbo" },
+        { modelId: "o1-preview", name: "O1 Preview" },
+        { modelId: "o1-mini", name: "O1 Mini" },
+      ],
+      gemini: [
+        { modelId: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash" },
+        { modelId: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
+        { modelId: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
+      ],
+      xai: [
+        { modelId: "grok-beta", name: "Grok Beta" },
+        { modelId: "grok-2-1212", name: "Grok 2" },
+      ],
+      deepseek: [
+        { modelId: "deepseek-chat", name: "DeepSeek Chat" },
+        { modelId: "deepseek-reasoner", name: "DeepSeek Reasoner" },
+      ],
+      mistral: [
+        { modelId: "mistral-large-latest", name: "Mistral Large" },
+        { modelId: "mistral-small-latest", name: "Mistral Small" },
+        { modelId: "codestral-latest", name: "Codestral" },
+      ],
+    };
+
+    return providerModels[provider] || [];
+  }
+
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = this.sessions[params.sessionId];
     if (!session) {
@@ -281,8 +356,15 @@ export class ClineAcpAgent implements Agent {
     // This allows follow-up prompts after a cancel
     session.cancelled = false;
 
-    // Convert ACP prompt to Cline format
-    const clinePrompt = acpPromptToCline(params);
+    // Convert ACP prompt to Cline format (pass debug function for detailed logging)
+    const clinePrompt = acpPromptToCline(params, (msg, data) => this.log(msg, data));
+
+    // Log the final result
+    this.log("prompt: converted to Cline format", {
+      textLength: clinePrompt.text?.length,
+      images: clinePrompt.images,
+      files: clinePrompt.files,
+    });
 
     // Send to Cline
     if (this.clineClient) {
@@ -313,8 +395,7 @@ export class ClineAcpAgent implements Agent {
         await this.clineClient.Task.askResponse({
           responseType: AskResponseType.MESSAGE_RESPONSE,
           text: clinePrompt.text,
-          images: clinePrompt.images,
-          files: clinePrompt.files,
+          images: clinePrompt.images || [],
         });
       }
 
@@ -328,9 +409,12 @@ export class ClineAcpAgent implements Agent {
         },
       });
 
+      // Extract text content for echo detection
+      const userText = clinePrompt.text;
+
       // Process streaming responses, skipping any existing messages
       // Also pass the user's input text so we can skip the echoed message
-      await this.processStreamingResponses(params.sessionId, existingTimestamps, clinePrompt.text);
+      await this.processStreamingResponses(params.sessionId, existingTimestamps, userText);
     }
 
     // Send at least one update to the client
@@ -362,12 +446,121 @@ export class ClineAcpAgent implements Agent {
 
   async setSessionModel(params: SetSessionModelRequest): Promise<SetSessionModelResponse | void> {
     if (this.clineClient) {
+      // Get current state to preserve the existing provider
+      const state = await this.clineClient.State.getLatestState();
+      const stateData = JSON.parse(state.stateJson || "{}");
+      const currentConfig = stateData.apiConfiguration || {};
+
+      // Get the configured providers (preserve original case for setting, lowercase for comparison)
+      const planProviderRaw = currentConfig.planModeApiProvider || "";
+      const actProviderRaw = currentConfig.actModeApiProvider || "";
+      const planProviderLower = planProviderRaw.toLowerCase();
+
+      this.log("setSessionModel: current providers", {
+        planProviderRaw,
+        actProviderRaw,
+        modelId: params.modelId,
+      });
+
+      // For CLINE/OpenRouter providers (or when provider is empty - default to CLINE behavior),
+      // we MUST fetch the model info. The Cline handler requires BOTH modelId AND modelInfo.
+      // The model list comes from OpenRouter, so if provider is empty, assume CLINE/OpenRouter.
+      let modelInfo: Record<string, unknown> | null = null;
+      const isClineOrOpenRouter =
+        planProviderLower === "cline" || planProviderLower === "openrouter" || !planProviderLower;
+
+      if (isClineOrOpenRouter) {
+        const modelsResponse = await this.clineClient.Models.refreshOpenRouterModels();
+        if (modelsResponse?.models && modelsResponse.models[params.modelId]) {
+          modelInfo = modelsResponse.models[params.modelId] as unknown as Record<string, unknown>;
+          this.log("setSessionModel: fetched model info for", {
+            modelId: params.modelId,
+            modelInfo,
+          });
+        } else {
+          this.log("setSessionModel: model not found in available models", {
+            modelId: params.modelId,
+            availableCount: Object.keys(modelsResponse?.models || {}).length,
+          });
+        }
+      }
+
+      // Build the API configuration based on the provider
+      // Different providers use different model ID fields
+      const apiConfig = this.buildModelConfig(
+        planProviderRaw,
+        actProviderRaw,
+        params.modelId,
+        modelInfo,
+      );
+
+      this.log("setSessionModel: updating settings", { apiConfig });
+
       await this.clineClient.State.updateSettings({
-        apiConfiguration: {
-          apiModelId: params.modelId,
-        },
+        apiConfiguration: apiConfig,
       });
     }
+  }
+
+  /**
+   * Build the API configuration for setting a model based on the provider
+   * Different providers store model IDs in different fields
+   */
+  private buildModelConfig(
+    planProvider: string,
+    actProvider: string,
+    modelId: string,
+    modelInfo: Record<string, unknown> | null = null,
+  ): Record<string, unknown> {
+    const planProviderLower = planProvider.toLowerCase();
+    const actProviderLower = actProvider.toLowerCase();
+
+    // Cline expects uppercase provider enum values (e.g., "CLINE", not "cline")
+    // If provider is empty, default to CLINE since model list comes from OpenRouter
+    const planProviderUpper = planProvider ? planProvider.toUpperCase() : "CLINE";
+    const actProviderUpper = actProvider ? actProvider.toUpperCase() : "CLINE";
+
+    const config: Record<string, unknown> = {
+      // Provider must be uppercase to match Cline's ApiProvider enum
+      planModeApiProvider: planProviderUpper,
+      actModeApiProvider: actProviderUpper,
+      // Always set the generic model ID field
+      planModeApiModelId: modelId,
+      actModeApiModelId: modelId,
+    };
+
+    // Set provider-specific model ID fields based on plan provider
+    // Empty provider defaults to CLINE behavior (OpenRouter model fields)
+    if (planProviderLower === "cline" || planProviderLower === "openrouter" || !planProviderLower) {
+      config.planModeOpenRouterModelId = modelId;
+      // CRITICAL: Also set the model info - Cline handler requires BOTH modelId AND modelInfo
+      if (modelInfo) {
+        config.planModeOpenRouterModelInfo = modelInfo;
+      }
+    } else if (planProviderLower === "openai" || planProviderLower === "openai_native") {
+      config.planModeOpenAiModelId = modelId;
+    } else if (planProviderLower === "ollama") {
+      config.planModeOllamaModelId = modelId;
+    } else if (planProviderLower === "groq") {
+      config.planModeGroqModelId = modelId;
+    }
+
+    // Set provider-specific model ID fields based on act provider
+    // Empty provider defaults to CLINE behavior (OpenRouter model fields)
+    if (actProviderLower === "cline" || actProviderLower === "openrouter" || !actProviderLower) {
+      config.actModeOpenRouterModelId = modelId;
+      if (modelInfo) {
+        config.actModeOpenRouterModelInfo = modelInfo;
+      }
+    } else if (actProviderLower === "openai" || actProviderLower === "openai_native") {
+      config.actModeOpenAiModelId = modelId;
+    } else if (actProviderLower === "ollama") {
+      config.actModeOllamaModelId = modelId;
+    } else if (actProviderLower === "groq") {
+      config.actModeGroqModelId = modelId;
+    }
+
+    return config;
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -652,9 +845,15 @@ export class ClineAcpAgent implements Agent {
         }
 
         // Check if Cline is waiting for user input (turn complete)
-        // This happens with plan_mode_respond, followup, completion_result
+        // This happens with plan_mode_respond, followup, completion_result, api_req_failed
         // Only break if the waiting message is NEW (not from before this prompt)
-        if (lastMessageIsNew && isWaitingForUserInput(messages)) {
+        const waitingForInput = isWaitingForUserInput(messages, (msg, data) => this.log(msg, data));
+        this.log("Checking if waiting for user input:", {
+          lastMessageIsNew,
+          waitingForInput,
+          lastAskType: String(lastMessage?.ask || "").toLowerCase(),
+        });
+        if (lastMessageIsNew && waitingForInput) {
           this.log("Breaking: Cline is waiting for user input");
           break;
         }
@@ -709,18 +908,12 @@ export class ClineAcpAgent implements Agent {
         this.log("handleApprovalRequest: sending YES to Cline");
         await this.clineClient.Task.askResponse({
           responseType: AskResponseType.YES_BUTTON_CLICKED,
-          text: "",
-          images: [],
-          files: [],
         });
         this.log("handleApprovalRequest: YES sent successfully");
       } else {
         this.log("handleApprovalRequest: sending NO to Cline");
         await this.clineClient.Task.askResponse({
           responseType: AskResponseType.NO_BUTTON_CLICKED,
-          text: "",
-          images: [],
-          files: [],
         });
         this.log("handleApprovalRequest: NO sent successfully");
 

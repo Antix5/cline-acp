@@ -42,6 +42,15 @@ function createMockClineClient(): ClineClient {
   const stateUpdates: StateUpdate[] = [];
   const partialMessages: ClineMessage[] = [];
 
+  // Default state with CLINE provider configured (realistic scenario)
+  const defaultState = {
+    mode: "plan",
+    apiConfiguration: {
+      planModeApiProvider: "CLINE",
+      actModeApiProvider: "CLINE",
+    },
+  };
+
   return {
     Task: {
       newTask: vi.fn().mockResolvedValue("task-123"),
@@ -56,7 +65,7 @@ function createMockClineClient(): ClineClient {
           }
         },
       }),
-      getLatestState: vi.fn().mockResolvedValue({ stateJson: "{}" }),
+      getLatestState: vi.fn().mockResolvedValue({ stateJson: JSON.stringify(defaultState) }),
       togglePlanActModeProto: vi.fn().mockResolvedValue(undefined),
       updateAutoApprovalSettings: vi.fn().mockResolvedValue(undefined),
       updateSettings: vi.fn().mockResolvedValue(undefined),
@@ -68,6 +77,15 @@ function createMockClineClient(): ClineClient {
           for (const msg of partialMessages) {
             yield msg;
           }
+        },
+      }),
+    },
+    Models: {
+      refreshOpenRouterModels: vi.fn().mockResolvedValue({
+        models: {
+          "anthropic/claude-sonnet-4": { name: "Claude Sonnet 4" },
+          "x-ai/grok-3": { name: "Grok 3" },
+          "claude-sonnet-4-20250514": { name: "Claude Sonnet 4", maxTokens: 8192 },
         },
       }),
     },
@@ -393,10 +411,24 @@ describe("ClineAcpAgent", () => {
       });
 
       const clineClient = agent.getClineClient();
+      // Now uses ModelsApiConfiguration with both OpenRouter model ID and model info fields
+      // The model info is fetched from refreshOpenRouterModels and included in the config
       expect(clineClient?.State.updateSettings).toHaveBeenCalledWith(
         expect.objectContaining({
           apiConfiguration: expect.objectContaining({
-            apiModelId: "claude-sonnet-4-20250514",
+            planModeOpenRouterModelId: "claude-sonnet-4-20250514",
+            actModeOpenRouterModelId: "claude-sonnet-4-20250514",
+            planModeApiModelId: "claude-sonnet-4-20250514",
+            actModeApiModelId: "claude-sonnet-4-20250514",
+            // Model info is required for CLINE/OpenRouter providers
+            planModeOpenRouterModelInfo: expect.objectContaining({
+              name: "Claude Sonnet 4",
+              maxTokens: 8192,
+            }),
+            actModeOpenRouterModelInfo: expect.objectContaining({
+              name: "Claude Sonnet 4",
+              maxTokens: 8192,
+            }),
           }),
         }),
       );
@@ -406,7 +438,7 @@ describe("ClineAcpAgent", () => {
 
 describe("ACP to Cline conversion", () => {
   describe("acpPromptToCline()", () => {
-    it("should convert text chunks to Cline text", () => {
+    it("should concatenate text content blocks", () => {
       const clinePrompt = acpPromptToCline({
         sessionId: "test",
         prompt: [
@@ -415,12 +447,12 @@ describe("ACP to Cline conversion", () => {
         ],
       });
 
-      expect(clinePrompt.text).toBe("Hello World");
-      expect(clinePrompt.images).toEqual([]);
-      expect(clinePrompt.files).toEqual([]);
+      expect(clinePrompt.text).toBe("Hello \nWorld");
+      expect(clinePrompt.images).toBeUndefined();
+      expect(clinePrompt.files).toBeUndefined();
     });
 
-    it("should convert file:// resource links to files array", () => {
+    it("should convert resource_link to files array", () => {
       const clinePrompt = acpPromptToCline({
         sessionId: "test",
         prompt: [
@@ -429,10 +461,11 @@ describe("ACP to Cline conversion", () => {
         ],
       });
 
-      expect(clinePrompt.files).toContain("/path/to/file.ts");
+      expect(clinePrompt.text).toBe("Check this file: ");
+      expect(clinePrompt.files).toEqual(["/path/to/file.ts"]);
     });
 
-    it("should convert embedded resources to context XML", () => {
+    it("should append embedded resource text content", () => {
       const clinePrompt = acpPromptToCline({
         sessionId: "test",
         prompt: [
@@ -447,19 +480,56 @@ describe("ACP to Cline conversion", () => {
         ],
       });
 
-      expect(clinePrompt.text).toContain("<context");
+      expect(clinePrompt.text).toContain("Here is the code: ");
       expect(clinePrompt.text).toContain("const x = 1;");
-      expect(clinePrompt.text).toContain("</context>");
+      expect(clinePrompt.text).toContain("[Resource: file:///path/to/code.ts]");
     });
 
-    it("should handle non-file URLs as text", () => {
+    it("should write image data to temp file and add to images array", () => {
+      const redPixelPng =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
       const clinePrompt = acpPromptToCline({
         sessionId: "test",
-        prompt: [{ type: "resource_link", uri: "https://example.com", name: "example.com" }],
+        prompt: [
+          { type: "text", text: "Check this image: " },
+          { type: "image", data: redPixelPng, mimeType: "image/png" },
+        ],
       });
 
-      expect(clinePrompt.text).toContain("https://example.com");
-      expect(clinePrompt.files).toEqual([]);
+      expect(clinePrompt.text).toBe("Check this image: ");
+      expect(clinePrompt.images).toBeDefined();
+      expect(clinePrompt.images!.length).toBe(1);
+      // The image path should be a temp file path
+      expect(clinePrompt.images![0]).toContain("cline-acp-image-");
+      expect(clinePrompt.images![0]).toContain(".png");
+    });
+
+    it("should extract file path from image with file:// URI", () => {
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "text", text: "Check this image: " },
+          // ACP ContentBlock with image that has URI (data/mimeType required but can be empty for URI-based)
+          { type: "image", data: "", mimeType: "image/png", uri: "file:///path/to/screenshot.png" },
+        ],
+      });
+
+      expect(clinePrompt.text).toBe("Check this image: ");
+      expect(clinePrompt.images).toEqual(["/path/to/screenshot.png"]);
+    });
+
+    it("should handle mixed content types", () => {
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "text", text: "Hello" },
+          { type: "resource_link", uri: "file:///test.ts", name: "test.ts" },
+        ],
+      });
+
+      expect(clinePrompt.text).toBe("Hello");
+      expect(clinePrompt.files).toEqual(["/test.ts"]);
     });
   });
 });
@@ -543,23 +613,26 @@ describe("Cline to ACP conversion", () => {
       expect(notification).toBeNull();
     });
 
-    it("should return null for ASK api_req_failed messages", () => {
+    it("should surface api_req_failed errors to the user", () => {
       const notification = clineMessageToAcpNotification(
         {
           ts: Date.now(),
           type: ClineMessageType.ASK,
           ask: ClineAsk.API_REQ_FAILED,
           text: JSON.stringify({
-            attempt: 3,
-            maxAttempts: 3,
-            failed: true,
-            message: "API request failed",
+            message: "Unauthorized: Please sign in to Cline before trying again.",
+            modelId: "anthropic/claude-sonnet-4.5",
+            providerId: "cline",
           }),
         },
         "session-123",
       );
 
-      expect(notification).toBeNull();
+      expect(notification).not.toBeNull();
+      expect(notification?.update.sessionUpdate).toBe("agent_message_chunk");
+      expect((notification?.update as any).content.text).toContain(
+        "Unauthorized: Please sign in to Cline before trying again.",
+      );
     });
 
     it("should return null for ASK resume_task messages", () => {
@@ -793,6 +866,19 @@ describe("Cline to ACP conversion", () => {
       ];
 
       expect(isWaitingForUserInput(messages)).toBe(false);
+    });
+
+    it("should return true for api_req_failed (to end stream and show error)", () => {
+      const messages: ClineMessage[] = [
+        {
+          ts: Date.now(),
+          type: ClineMessageType.ASK,
+          ask: ClineAsk.API_REQ_FAILED,
+          text: JSON.stringify({ message: "API request failed" }),
+        },
+      ];
+
+      expect(isWaitingForUserInput(messages)).toBe(true);
     });
   });
 
@@ -1867,6 +1953,9 @@ describe("Streaming Integration Tests", () => {
             async *[Symbol.asyncIterator]() {},
           }),
         },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
+        },
       };
 
       const mockConnection = {
@@ -1961,6 +2050,9 @@ describe("Streaming Integration Tests", () => {
             async *[Symbol.asyncIterator]() {},
           }),
         },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
+        },
       };
 
       const mockConnection = {
@@ -2047,6 +2139,9 @@ describe("Streaming Integration Tests", () => {
             async *[Symbol.asyncIterator]() {},
           }),
         },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
+        },
       };
 
       const mockConnection = {
@@ -2132,6 +2227,9 @@ describe("Streaming Integration Tests", () => {
           subscribeToPartialMessage: vi.fn().mockReturnValue({
             async *[Symbol.asyncIterator]() {},
           }),
+        },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
         },
       };
 
@@ -2244,6 +2342,9 @@ describe("Streaming Integration Tests", () => {
           subscribeToPartialMessage: vi.fn().mockReturnValue({
             async *[Symbol.asyncIterator]() {},
           }),
+        },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
         },
       };
 
@@ -2372,6 +2473,9 @@ describe("Streaming Integration Tests", () => {
           subscribeToPartialMessage: vi.fn().mockReturnValue({
             async *[Symbol.asyncIterator]() {},
           }),
+        },
+        Models: {
+          refreshOpenRouterModels: vi.fn().mockResolvedValue({ models: {} }),
         },
       };
 

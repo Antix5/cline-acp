@@ -2,6 +2,9 @@
  * Conversion functions between ACP protocol and Cline gRPC types
  */
 
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { PromptRequest, SessionNotification } from "@agentclientprotocol/sdk";
 import {
   ClineMessage,
@@ -15,44 +18,144 @@ import {
 
 /**
  * Convert ACP prompt to Cline format
+ * Extracts text content and converts images to file paths
  */
-export function acpPromptToCline(prompt: PromptRequest): ClinePrompt {
-  let text = "";
+export function acpPromptToCline(
+  prompt: PromptRequest,
+  debug?: (msg: string, data?: unknown) => void,
+): ClinePrompt {
+  const textParts: string[] = [];
   const images: string[] = [];
   const files: string[] = [];
 
   for (const chunk of prompt.prompt) {
-    switch (chunk.type) {
-      case "text":
-        text += chunk.text;
-        break;
-      case "resource_link":
-        if (chunk.uri.startsWith("file://")) {
-          files.push(chunk.uri.slice(7)); // Remove file:// prefix
-        } else {
-          text += `[${chunk.uri}]`;
-        }
-        break;
-      case "resource":
-        if ("text" in chunk.resource) {
-          text += `\n<context ref="${chunk.resource.uri}">\n${chunk.resource.text}\n</context>`;
-        }
-        break;
-      case "image":
-        if ("data" in chunk && chunk.data) {
-          // For base64 images, we'd need to write to temp file
-          // For now, note that Cline expects file paths
-          // This would be handled by the agent layer
-        }
-        break;
+    if (chunk.type === "text" && "text" in chunk && chunk.text) {
+      textParts.push(chunk.text);
+    } else if (chunk.type === "image") {
+      // Log the raw image chunk for debugging
+      debug?.("image chunk received", {
+        keys: Object.keys(chunk),
+        hasUri: "uri" in chunk,
+        uri: "uri" in chunk ? chunk.uri : undefined,
+        hasData: "data" in chunk,
+        dataLength: "data" in chunk ? (chunk as { data?: string }).data?.length : 0,
+        mimeType: "mimeType" in chunk ? chunk.mimeType : undefined,
+      });
 
-      default:
-        // Unknown chunk type - ignore
-        break;
+      // Handle image content - Cline internal code expects DATA URLs, not file paths!
+      // Despite proto comments saying "file paths", the actual code uses data:image/...;base64,...
+      let imageDataUrl: string | null = null;
+
+      if ("data" in chunk && chunk.data && chunk.data.length > 0) {
+        // Use base64 data directly to create data URL
+        const mimeType =
+          "mimeType" in chunk ? (chunk.mimeType as string) : "image/png";
+        imageDataUrl = `data:${mimeType};base64,${chunk.data}`;
+        debug?.("created data URL from base64", {
+          mimeType,
+          dataLength: chunk.data.length,
+        });
+      } else if ("uri" in chunk && chunk.uri) {
+        // No base64 data - try to read file and convert to data URL
+        const uri = chunk.uri as string;
+        debug?.("no base64 data, trying to read file", { uri });
+        if (uri.startsWith("file://")) {
+          const filePath = decodeURIComponent(uri.slice(7));
+          if (fs.existsSync(filePath)) {
+            try {
+              const fileBuffer = fs.readFileSync(filePath);
+              const base64Data = fileBuffer.toString("base64");
+              const mimeType = getMimeTypeFromPath(filePath);
+              imageDataUrl = `data:${mimeType};base64,${base64Data}`;
+              debug?.("created data URL from file", { filePath, mimeType });
+            } catch (err) {
+              debug?.("failed to read file", { filePath, error: String(err) });
+            }
+          }
+        }
+      }
+
+      if (imageDataUrl) {
+        images.push(imageDataUrl);
+      } else {
+        debug?.("image chunk: no valid data or file path available");
+      }
+    } else if (chunk.type === "resource" && "resource" in chunk) {
+      // Embedded resource - append text content
+      const resource = chunk.resource;
+      if ("text" in resource && resource.text) {
+        // Include resource URI as context
+        if (resource.uri) {
+          textParts.push(`[Resource: ${resource.uri}]\n${resource.text}`);
+        } else {
+          textParts.push(resource.text);
+        }
+      }
+    } else if (chunk.type === "resource_link" && "uri" in chunk && chunk.uri) {
+      // Resource link - treat as file attachment if it's a file:// URI
+      const uri = chunk.uri as string;
+      if (uri.startsWith("file://")) {
+        // URL-decode the path (handles %20 spaces, etc.)
+        const filePath = decodeURIComponent(uri.slice(7));
+        files.push(filePath);
+      }
     }
   }
 
-  return { text, images, files };
+  return {
+    text: textParts.join("\n"),
+    images: images.length > 0 ? images : undefined,
+    files: files.length > 0 ? files : undefined,
+  };
+}
+
+/**
+ * Get MIME type from file path based on extension
+ */
+function getMimeTypeFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const extMap: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+  };
+  return extMap[ext] || "image/png";
+}
+
+/**
+ * Write base64 image data to a temp file
+ * Returns the file path or null if writing fails
+ * NOTE: This function is no longer used but kept for potential future use
+ */
+function writeTempImage(base64Data: string, mimeType?: string): string | null {
+  try {
+    // Determine file extension from mime type
+    let ext = ".png"; // Default
+    if (mimeType) {
+      const mimeMap: Record<string, string> = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+      };
+      ext = mimeMap[mimeType] || ".png";
+    }
+
+    // Create temp file
+    const tempDir = os.tmpdir();
+    const tempFile = path.join(tempDir, `cline-acp-image-${Date.now()}${ext}`);
+
+    // Write base64 data to file
+    const buffer = Buffer.from(base64Data, "base64");
+    fs.writeFileSync(tempFile, buffer);
+
+    return tempFile;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -144,9 +247,34 @@ export function clineMessageToAcpNotification(
 
   // ASK messages (requesting input/approval)
   if (msgType === "ask") {
-    // Skip API-related asks (failures, retries)
-    if (askType.includes("api_req")) {
-      return null;
+    // Handle API request failures - surface the error to the user
+    if (askType === "api_req_failed") {
+      try {
+        const errorData = JSON.parse(msg.text || "{}");
+        const errorMessage =
+          errorData.message || "API request failed. Please check your configuration.";
+        return {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: `⚠️ **Error**: ${errorMessage}`,
+            },
+          },
+        };
+      } catch {
+        return {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: "⚠️ **Error**: API request failed. Please check your configuration.",
+            },
+          },
+        };
+      }
     }
 
     // Skip internal ask types
@@ -742,27 +870,44 @@ export function getLatestTaskProgress(messages: ClineMessage[]): ClineMessage | 
  * Important: Only returns true if the last message is complete (not partial)
  * because we need to process the full response before ending the turn
  */
-export function isWaitingForUserInput(messages: ClineMessage[]): boolean {
-  if (messages.length === 0) return false;
+export function isWaitingForUserInput(
+  messages: ClineMessage[],
+  debug?: (msg: string, data?: unknown) => void,
+): boolean {
+  if (messages.length === 0) {
+    debug?.("isWaitingForUserInput: no messages");
+    return false;
+  }
 
   const lastMessage = messages[messages.length - 1];
 
   // If the last message is still partial, we're not done yet
   if (lastMessage.partial) {
+    debug?.("isWaitingForUserInput: message is partial");
     return false;
   }
 
   const msgType = String(lastMessage.type || "").toLowerCase();
   const askType = String(lastMessage.ask || "").toLowerCase();
 
-  // These ask types mean Cline is waiting for user response
+  // These ask types mean Cline is waiting for user response (or has errored)
   const waitingTypes = [
     "plan_mode_respond", // Plan mode - waiting for user to approve/respond
     "followup", // Asking follow-up question
     "completion_result", // Task completed, asking if satisfied
+    "api_req_failed", // API request failed - need to surface error and stop
   ];
 
+  debug?.("isWaitingForUserInput: checking", {
+    msgType,
+    askType,
+    partial: lastMessage.partial,
+    isAsk: msgType === "ask",
+    isWaitingType: waitingTypes.includes(askType),
+  });
+
   if (msgType === "ask" && waitingTypes.includes(askType)) {
+    debug?.("isWaitingForUserInput: returning true");
     return true;
   }
 

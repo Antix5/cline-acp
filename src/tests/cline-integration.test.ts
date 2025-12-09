@@ -67,8 +67,6 @@ describe("ClineAcpAgent Integration Tests", () => {
     const client = await createClineClient(address);
     const taskId = await client.Task.newTask({
       text: "Hello, this is a test task",
-      images: [],
-      files: [],
     });
     expect(taskId).toBeDefined();
     expect(typeof taskId).toBe("string");
