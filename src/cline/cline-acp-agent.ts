@@ -27,7 +27,6 @@ import {
   ClineSession,
   PlanActMode,
   AskResponseType,
-  ApiProvider,
   StateUpdate,
   ClineMessage,
 } from "./types.js";

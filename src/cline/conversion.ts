@@ -4,7 +4,6 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { PromptRequest, SessionNotification } from "@agentclientprotocol/sdk";
 import {
   ClineMessage,
@@ -125,40 +124,6 @@ function getMimeTypeFromPath(filePath: string): string {
 }
 
 /**
- * Write base64 image data to a temp file
- * Returns the file path or null if writing fails
- * NOTE: This function is no longer used but kept for potential future use
- */
-function writeTempImage(base64Data: string, mimeType?: string): string | null {
-  try {
-    // Determine file extension from mime type
-    let ext = ".png"; // Default
-    if (mimeType) {
-      const mimeMap: Record<string, string> = {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/jpg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-      };
-      ext = mimeMap[mimeType] || ".png";
-    }
-
-    // Create temp file
-    const tempDir = os.tmpdir();
-    const tempFile = path.join(tempDir, `cline-acp-image-${Date.now()}${ext}`);
-
-    // Write base64 data to file
-    const buffer = Buffer.from(base64Data, "base64");
-    fs.writeFileSync(tempFile, buffer);
-
-    return tempFile;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Convert Cline message to ACP session notification
  * State JSON uses lowercase enums: "say", "ask", "text", "reasoning", etc.
  *
@@ -232,6 +197,10 @@ export function clineMessageToAcpNotification(
     if (text) {
       // Skip if the text looks like raw JSON tool data
       if (looksLikeToolJson(text)) {
+        return null;
+      }
+      // Skip internal retry mechanism messages
+      if (looksLikeRetryJson(text)) {
         return null;
       }
       return {
@@ -350,6 +319,37 @@ function looksLikeToolJson(text: string): boolean {
       }
       // Has tool-like fields without explicit "tool" key
       if ("path" in parsed && ("content" in parsed || "operationIsLocatedInWorkspace" in parsed)) {
+        return true;
+      }
+    }
+  } catch {
+    // Not valid JSON
+  }
+
+  return false;
+}
+
+/**
+ * Check if text looks like internal retry mechanism JSON that should be filtered out
+ * Cline emits these messages during API retries: {"attempt":1,"maxAttempts":3,"delaySeconds":0}
+ */
+function looksLikeRetryJson(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "object" && parsed !== null) {
+      // Check for retry mechanism signature: has attempt, maxAttempts, and delaySeconds
+      if (
+        "attempt" in parsed &&
+        "maxAttempts" in parsed &&
+        "delaySeconds" in parsed &&
+        typeof parsed.attempt === "number" &&
+        typeof parsed.maxAttempts === "number"
+      ) {
         return true;
       }
     }

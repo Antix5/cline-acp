@@ -343,6 +343,41 @@ describe("ClineAcpAgent", () => {
       const clineClient = agent.getClineClient();
       expect(clineClient?.Task.cancelTask).toHaveBeenCalled();
     });
+
+    it("should allow follow-up prompts after cancel (reset cancelled flag)", async () => {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+
+      const session = await agent.newSession({
+        cwd: "/test/path",
+        mcpServers: [],
+      });
+
+      // Send initial prompt
+      await agent.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "First message" }],
+      });
+
+      // Cancel the session
+      await agent.cancel({ sessionId: session.sessionId });
+      expect(agent.getSession(session.sessionId)?.cancelled).toBe(true);
+
+      // Send follow-up prompt - cancelled flag should be reset
+      await agent.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "Follow-up after cancel" }],
+      });
+
+      // Cancelled flag should be reset to allow processing
+      expect(agent.getSession(session.sessionId)?.cancelled).toBe(false);
+
+      // askResponse should have been called for the follow-up
+      const clineClient = agent.getClineClient();
+      expect(clineClient?.Task.askResponse).toHaveBeenCalled();
+    });
   });
 
   describe("setSessionMode()", () => {
@@ -485,7 +520,7 @@ describe("ACP to Cline conversion", () => {
       expect(clinePrompt.text).toContain("[Resource: file:///path/to/code.ts]");
     });
 
-    it("should write image data to temp file and add to images array", () => {
+    it("should create data URL from base64 image data", () => {
       const redPixelPng =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
@@ -500,23 +535,45 @@ describe("ACP to Cline conversion", () => {
       expect(clinePrompt.text).toBe("Check this image: ");
       expect(clinePrompt.images).toBeDefined();
       expect(clinePrompt.images!.length).toBe(1);
-      // The image path should be a temp file path
-      expect(clinePrompt.images![0]).toContain("cline-acp-image-");
-      expect(clinePrompt.images![0]).toContain(".png");
+      // Cline expects data URLs, not file paths
+      expect(clinePrompt.images![0]).toMatch(/^data:image\/png;base64,/);
+      expect(clinePrompt.images![0]).toContain(redPixelPng);
     });
 
-    it("should extract file path from image with file:// URI", () => {
+    it("should use correct MIME type for data URL", () => {
+      const jpegData = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRof";
+
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [{ type: "image", data: jpegData, mimeType: "image/jpeg" }],
+      });
+
+      expect(clinePrompt.images![0]).toMatch(/^data:image\/jpeg;base64,/);
+    });
+
+    it("should default to image/png when MIME type not provided", () => {
+      const pngData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [{ type: "image", data: pngData } as any],
+      });
+
+      expect(clinePrompt.images![0]).toMatch(/^data:image\/png;base64,/);
+    });
+
+    it("should skip images with empty data when no file URI", () => {
       const clinePrompt = acpPromptToCline({
         sessionId: "test",
         prompt: [
           { type: "text", text: "Check this image: " },
-          // ACP ContentBlock with image that has URI (data/mimeType required but can be empty for URI-based)
-          { type: "image", data: "", mimeType: "image/png", uri: "file:///path/to/screenshot.png" },
+          // Empty data and no valid file URI
+          { type: "image", data: "", mimeType: "image/png" },
         ],
       });
 
       expect(clinePrompt.text).toBe("Check this image: ");
-      expect(clinePrompt.images).toEqual(["/path/to/screenshot.png"]);
+      expect(clinePrompt.images).toBeUndefined();
     });
 
     it("should handle mixed content types", () => {
@@ -530,6 +587,68 @@ describe("ACP to Cline conversion", () => {
 
       expect(clinePrompt.text).toBe("Hello");
       expect(clinePrompt.files).toEqual(["/test.ts"]);
+    });
+
+    it("should handle multiple file attachments", () => {
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "text", text: "Check these files:" },
+          { type: "resource_link", uri: "file:///path/to/file1.ts", name: "file1.ts" },
+          { type: "resource_link", uri: "file:///path/to/file2.ts", name: "file2.ts" },
+          { type: "resource_link", uri: "file:///path/to/file3.json", name: "file3.json" },
+        ],
+      });
+
+      expect(clinePrompt.text).toBe("Check these files:");
+      expect(clinePrompt.files).toHaveLength(3);
+      expect(clinePrompt.files).toEqual([
+        "/path/to/file1.ts",
+        "/path/to/file2.ts",
+        "/path/to/file3.json",
+      ]);
+    });
+
+    it("should URL-decode file paths with special characters", () => {
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "resource_link", uri: "file:///path/with%20spaces/file%2B1.ts", name: "file.ts" },
+        ],
+      });
+
+      expect(clinePrompt.files).toEqual(["/path/with spaces/file+1.ts"]);
+    });
+
+    it("should ignore non-file:// URIs in resource_link", () => {
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "text", text: "Check this:" },
+          { type: "resource_link", uri: "https://example.com/file.ts", name: "file.ts" },
+        ],
+      });
+
+      expect(clinePrompt.text).toBe("Check this:");
+      expect(clinePrompt.files).toBeUndefined();
+    });
+
+    it("should handle combined images and file attachments", () => {
+      const pngData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+      const clinePrompt = acpPromptToCline({
+        sessionId: "test",
+        prompt: [
+          { type: "text", text: "Check this image and file:" },
+          { type: "image", data: pngData, mimeType: "image/png" },
+          { type: "resource_link", uri: "file:///path/to/code.ts", name: "code.ts" },
+        ],
+      });
+
+      expect(clinePrompt.text).toBe("Check this image and file:");
+      expect(clinePrompt.images).toHaveLength(1);
+      expect(clinePrompt.images![0]).toMatch(/^data:image\/png;base64,/);
+      expect(clinePrompt.files).toEqual(["/path/to/code.ts"]);
     });
   });
 });
@@ -611,6 +730,66 @@ describe("Cline to ACP conversion", () => {
       );
 
       expect(notification).toBeNull();
+    });
+
+    it("should filter out retry JSON messages", () => {
+      // These are internal Cline retry mechanism messages that shouldn't be shown to users
+      const retryJson = JSON.stringify({
+        attempt: 1,
+        maxAttempts: 3,
+        delaySeconds: 0,
+      });
+
+      const notification = clineMessageToAcpNotification(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: retryJson,
+        },
+        "session-123",
+        1, // Not first message
+      );
+
+      expect(notification).toBeNull();
+    });
+
+    it("should filter out failed retry JSON messages", () => {
+      const failedRetryJson = JSON.stringify({
+        attempt: 3,
+        maxAttempts: 3,
+        delaySeconds: 0,
+        failed: true,
+      });
+
+      const notification = clineMessageToAcpNotification(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: failedRetryJson,
+        },
+        "session-123",
+        1,
+      );
+
+      expect(notification).toBeNull();
+    });
+
+    it("should not filter legitimate JSON responses", () => {
+      // A legitimate response that happens to be JSON
+      const notification = clineMessageToAcpNotification(
+        {
+          ts: Date.now(),
+          type: ClineMessageType.SAY,
+          say: ClineSay.TEXT,
+          text: JSON.stringify({ message: "Here is your data", data: [1, 2, 3] }),
+        },
+        "session-123",
+        1,
+      );
+
+      expect(notification).not.toBeNull();
     });
 
     it("should surface api_req_failed errors to the user", () => {

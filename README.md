@@ -80,6 +80,16 @@ This adapter connects to Cline via its gRPC interface:
 
 Cline handles all file operations and tool execution internally.
 
+## Image Support
+
+Image attachments (screenshots, images) are supported when using a vision-capable model in Cline:
+
+- Images are converted to data URLs and passed to Cline's API
+- The model must support image/vision input (e.g., Claude 3.5 Sonnet, GPT-4V)
+- If you switch to a non-vision-capable model, you'll see an error: "No endpoints found that support image input"
+
+To use images, simply paste or attach them in your ACP client (e.g., Zed).
+
 ## Known Limitations
 
 Due to limitations in the Cline CLI's gRPC interface, some ACP features are not fully supported:
@@ -90,6 +100,10 @@ Due to limitations in the Cline CLI's gRPC interface, some ACP features are not 
 | Available commands         | Not available | Cline doesn't expose a list of available slash commands through its gRPC interface.                                  |
 
 These limitations are upstream in the Cline CLI and would require changes to the [cline/cline](https://github.com/cline/cline) repository to resolve.
+
+### Known Issues
+
+- **Model switching during retry**: If you switch models while Cline is retrying a failed API request, the session may become stuck. Workaround: Cancel and start a new session.
 
 ## Development
 
