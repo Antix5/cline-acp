@@ -807,6 +807,9 @@ export class ClineAcpAgent implements Agent {
               );
             }
             await this.client.sessionUpdate(notification);
+
+            // Send cost footer on EVERY message for continuous tracking
+            await this.sendCostFooter(sessionId, session);
           }
         }
 
@@ -853,12 +856,16 @@ export class ClineAcpAgent implements Agent {
           lastAskType: String(lastMessage?.ask || "").toLowerCase(),
         });
         if (lastMessageIsNew && waitingForInput) {
+          // Send cost & token usage footer
+          await this.sendCostFooter(sessionId, session);
           this.log("Breaking: Cline is waiting for user input");
           break;
         }
 
         // Check if task is fully complete (only for new messages)
         if (lastMessageIsNew && isTaskComplete(messages)) {
+          // Send cost & token usage footer
+          await this.sendCostFooter(sessionId, session);
           this.log("Breaking: Task is complete");
           break;
         }
@@ -869,6 +876,55 @@ export class ClineAcpAgent implements Agent {
       this.log("State stream ended with error:", error);
     }
     this.log("processStreamingResponses: finished");
+  }
+
+  /**
+   * Send a footer message with cost and context window usage
+   */
+  private async sendCostFooter(sessionId: string, session: ClineSession): Promise<void> {
+    let contextInfo = "";
+
+    if (this.clineClient) {
+      try {
+        const state = await this.clineClient.State.getLatestState();
+        const stateData = JSON.parse(state.stateJson || "{}");
+        const apiConfig = stateData.apiConfiguration || {};
+        const provider = (apiConfig.planModeApiProvider || "").toLowerCase();
+
+        // Get context window for the current model
+        const planModelId =
+          apiConfig.planModeOpenRouterModelId ||
+          apiConfig.planModeApiModelId ||
+          apiConfig.apiModelId;
+
+        if (planModelId) {
+          // If OpenRouter/Cline, we can get the context window from the models list
+          if (provider === "cline" || provider === "openrouter" || !provider) {
+            const modelsResponse = await this.clineClient.Models.refreshOpenRouterModels().catch(
+              () => null,
+            );
+            if (modelsResponse?.models && modelsResponse.models[planModelId]) {
+              const maxTokens = modelsResponse.models[planModelId].contextWindow;
+              if (maxTokens) {
+                contextInfo = ` **Max context:** ${maxTokens.toLocaleString()}, **Total token In:** ${session.totalTokensIn}, **Total token Out:** ${session.totalTokensOut}`;
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore errors fetching context info
+      }
+    }
+
+    const costFooter = `\n\n> 💰 **Cost:** $${session.totalCost.toFixed(4)} | \n **Context Info:** \n ${contextInfo}`;
+
+    await this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: costFooter },
+      },
+    });
   }
 
   private async handleApprovalRequest(sessionId: string, messages: ClineMessage[]): Promise<void> {
