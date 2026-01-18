@@ -29,6 +29,7 @@ import {
   AskResponseType,
   StateUpdate,
   ClineMessage,
+  PermissionOutcome,
 } from "./types.js";
 import {
   acpPromptToCline,
@@ -925,11 +926,12 @@ export class ClineAcpAgent implements Agent {
 
     this.log("handleApprovalRequest: got response from ACP client", { outcome: response.outcome });
 
+
     // Send response to Cline
     if (this.clineClient) {
-      const outcome = response.outcome as any;
+      const outcome = response.outcome as PermissionOutcome;
       if (
-        outcome?.outcome === "selected" &&
+        outcome.outcome === "selected" &&
         (outcome.optionId === "allow" || outcome.optionId === "allow_always")
       ) {
         this.log("handleApprovalRequest: sending YES to Cline");
@@ -937,7 +939,7 @@ export class ClineAcpAgent implements Agent {
           responseType: AskResponseType.YES_BUTTON_CLICKED,
         });
         this.log("handleApprovalRequest: YES sent successfully");
-      } else if (outcome?.outcome === "selected" && outcome.optionId === "edit") {
+      } else if (outcome.outcome === "selected" && outcome.optionId === "edit") {
         // If edit is selected, we don't respond to the tool call yet.
         // Instead, we mark the session as waiting for correction.
         // The next user prompt will be used as the response to this tool call.

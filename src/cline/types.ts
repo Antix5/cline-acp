@@ -335,3 +335,8 @@ export interface ClineCostInfo {
   cacheReads: number;
   cost: number;
 }
+
+export type PermissionOutcome = 
+  | { outcome: "selected"; optionId: "allow" | "allow_always" | "reject" | "edit" }
+  | { outcome: "dismissed" }
+  | { outcome: "error"; message: string };
