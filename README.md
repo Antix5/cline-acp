@@ -23,6 +23,15 @@ npm install -g cline
 ```
 
 Configure your API key in Cline's settings before use.
+To do this, here are the following steps to follow from the Cline CLI documentation (https://docs.cline.bot/cline-cli/installation):
+
+```bash
+cline auth
+```
+
+This will open a menu where you will have the choice between signing in with your cline account or setting up an API key for your preferred AI provider.
+
+If you do not do that, Zed will display a message like "Error ⚠️: OpenRouter API key is required"
 
 ## Installation
 
